@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 plugins {
     kotlin("jvm")
     `java-gradle-plugin`
+    `maven-publish`
     alias(libs.plugins.pluginPublish)
     alias(libs.plugins.serialization)
 }
@@ -16,14 +17,15 @@ dependencies {
     testImplementation(libs.junit)
 }
 
-java {
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+kotlin {
+    jvmToolchain {
+        languageVersion.set(JavaLanguageVersion.of(libs.versions.jvm.get()))
+    }
 }
 
-tasks.withType<KotlinCompile> {
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_1_8.toString()
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(libs.versions.jvm.get()))
     }
 }
 
