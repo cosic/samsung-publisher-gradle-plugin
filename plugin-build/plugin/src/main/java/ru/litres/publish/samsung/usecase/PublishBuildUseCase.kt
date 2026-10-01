@@ -43,21 +43,12 @@ class PublishBuildUseCase(
         networkClient.setBearerAuth(accessToken)
         uploadNetworkClient.setBearerAuth(accessToken)
 
-        val success = updateAppRepository.update(apk, publishSetting)
+        updateAppRepository.update(apk, publishSetting)
+        println("-------- Success updated apk ----------")
 
-        if (success) {
-            println("-------- Success updated apk ----------")
-        } else {
-            println("-------- Error while updating apk ----------")
-        }
-
-        if (success && publishSetting.submitReview) {
-            val submitReviewSuccess = updateAppRepository.submitReview(publishSetting)
-            if (submitReviewSuccess) {
-                println("-------- Success submit review ----------")
-            } else {
-                println("-------- Error while submit review ----------")
-            }
+        if (publishSetting.submitReview) {
+            updateAppRepository.submitReview(publishSetting)
+            println("-------- Success submit review ----------")
         }
     }
 

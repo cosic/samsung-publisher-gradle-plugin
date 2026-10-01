@@ -205,4 +205,4 @@ samsungPublishConfig {
 | uploadAttempts | Int | How many times the apk upload is attempted. Only transport failures, `408`, `429` and `5xx` answers are retried | 3 |
 | uploadRetryDelayMs | Long | Pause before the first retry, doubled on every further attempt | 5 000 |
 | proxy | String? | Proxy for every call, `host:port` or `scheme://host:port`. `null` keeps the JVM defaults, so `-Dhttps.proxyHost` still works | null |
-| uploadUrl | String? | Overrides the upload url returned by `/seller/createUploadSessionId`. `null` means the url from the session response is used | null |
+| uploadUrl | String? | Overrides the upload url returned by `/seller/createUploadSessionId`. `null` means the url from the session response is used, and such a url is only followed when it points at a `samsungapps.com` host, since the upload carries the access token | null |

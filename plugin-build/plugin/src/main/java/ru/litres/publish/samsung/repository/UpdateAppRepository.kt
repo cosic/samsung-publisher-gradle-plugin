@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonObject
 import ru.litres.publish.samsung.DebugSetting
 import ru.litres.publish.samsung.NetworkSetting
 import ru.litres.publish.samsung.PublishSetting
+import ru.litres.publish.samsung.exception.NotFoundRequiredField
 import ru.litres.publish.samsung.exception.UploadApkException
 import ru.litres.publish.samsung.models.update.AddBinaryRequest
 import ru.litres.publish.samsung.models.update.AddBinaryResponse
@@ -19,6 +20,7 @@ import ru.litres.publish.samsung.models.upload.UploadResponse
 import ru.litres.publish.samsung.models.upload.session.UploadSessionResponse
 import ru.litres.publish.samsung.network.NetworkClient
 import ru.litres.publish.samsung.network.bodyOrThrow
+import ru.litres.publish.samsung.utils.resolveUploadUrl
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -34,55 +36,31 @@ class UpdateAppRepository(
      *   2. upload the apk to the url from the session, retrying transport failures -> fileKey
      *   3. contentUpdate with metadata only -> moves the app into REGISTERING state
      *   4. add the uploaded binary via POST /seller/v2/content/binary
+     *
+     * Every step throws [UploadApkException] when it does not succeed. A step that merely reports
+     * the failure and lets the task return would end the build with "BUILD SUCCESSFUL" next to an
+     * error line, which is how a release silently does not reach the store.
      */
     fun update(
         apk: File,
         publishSetting: PublishSetting,
-    ): Boolean {
-        val session = getUploadSession()
-        val fileKey = uploadApkWithRetry(session, apk)
-
-        val metadataUpdated = updateApplication(publishSetting)
-        if (!metadataUpdated) return false
-
-        return addBinary(fileKey, publishSetting)
+    ) {
+        val fileKey = uploadApkWithRetry(apk)
+        updateApplication(publishSetting)
+        addBinary(fileKey, publishSetting)
     }
 
-    fun submitReview(publishSetting: PublishSetting): Boolean {
-        return submitReviewApplication(publishSetting)
+    fun submitReview(publishSetting: PublishSetting) {
+        submitReviewApplication(publishSetting)
     }
 
-    private fun getUploadSession(): UploadSessionResponse =
-        networkClient.post(CREATE_UPLOAD_SESSION)
-            .responseObject<UploadSessionResponse>(kotlinxDeserializerOf())
-            .bodyOrThrow(CREATE_UPLOAD_SESSION)
-
-    /**
-     * Galaxy Store returns the upload endpoint together with the session id, and it points to a
-     * different host than the rest of the api. Honour that url instead of a hardcoded one, so a
-     * change on the store side does not require a new plugin release.
-     */
-    private fun resolveUploadUrl(session: UploadSessionResponse): String =
-        networkSetting.uploadUrl?.takeUnless(String::isBlank)
-            ?: session.url?.takeUnless(String::isBlank)
-            ?: UPLOAD_APK
-
-    private fun uploadApkWithRetry(
-        session: UploadSessionResponse,
-        file: File,
-    ): String {
-        val sessionId =
-            session.sessionId
-                ?: throw UploadApkException("Field \"sessionId\" not found in \"$CREATE_UPLOAD_SESSION\"")
-        val uploadUrl = resolveUploadUrl(session)
+    private fun uploadApkWithRetry(file: File): String {
         val attempts = networkSetting.uploadAttempts.coerceAtLeast(1)
-        println("Uploading apk to $uploadUrl")
-
         var delayMs = networkSetting.uploadRetryDelayMs
         var attempt = 1
         while (true) {
             try {
-                return uploadApk(sessionId, uploadUrl, file)
+                return uploadAttempt(file)
             } catch (error: UploadApkException) {
                 if (!error.retryable || attempt >= attempts) throw error
                 println("Upload attempt $attempt of $attempts failed: ${error.message}")
@@ -92,6 +70,26 @@ class UpdateAppRepository(
                 attempt++
             }
         }
+    }
+
+    /**
+     * The session is created inside the retry loop on purpose. The store does not promise that a
+     * session survives a failed upload, and "/seller/createUploadSessionId" is a cheap json call
+     * compared to sending the apk again to a session that may already be spent.
+     */
+    private fun uploadAttempt(file: File): String {
+        val session =
+            networkClient.post(CREATE_UPLOAD_SESSION)
+                .responseObject<UploadSessionResponse>(kotlinxDeserializerOf())
+                .bodyOrThrow(CREATE_UPLOAD_SESSION)
+
+        val sessionId =
+            session.sessionId
+                ?: throw UploadApkException("Field \"sessionId\" not found in \"$CREATE_UPLOAD_SESSION\"")
+        val uploadUrl = resolveUploadUrl(networkSetting.uploadUrl, session.url, UPLOAD_APK)
+        println("Uploading apk to $uploadUrl")
+
+        return uploadApk(sessionId, uploadUrl, file)
     }
 
     private fun uploadApk(
@@ -122,9 +120,9 @@ class UpdateAppRepository(
         return key
     }
 
-    @Suppress("ReturnCount")
-    private fun updateApplication(publishSetting: PublishSetting): Boolean {
-        val contentId = publishSetting.contentId ?: return false
+    @Suppress("ThrowsCount")
+    private fun updateApplication(publishSetting: PublishSetting) {
+        val contentId = publishSetting.contentId ?: throw NotFoundRequiredField("contentId")
         val paid = if (publishSetting.paid) YES_FIELD else NO_FIELD
         val data =
             UpdateDataRequest(
@@ -138,7 +136,7 @@ class UpdateAppRepository(
         if (debugSetting.dryMode) {
             println("Data for update: ")
             println(data)
-            return true
+            return
         }
 
         val updateResponse =
@@ -148,16 +146,19 @@ class UpdateAppRepository(
                 .bodyOrThrow(UPDATE_APPLICATION)
 
         if (updateResponse.errorMsg != null) throw UploadApkException(updateResponse.errorMsg)
-
-        return updateResponse.contentStatus == SUCCESS_UPDATE_APK_RESULT
+        if (updateResponse.contentStatus != SUCCESS_UPDATE_APK_RESULT) {
+            throw UploadApkException(
+                "\"$UPDATE_APPLICATION\" left the app in status \"${updateResponse.contentStatus}\", " +
+                    "expected \"$SUCCESS_UPDATE_APK_RESULT\"",
+            )
+        }
     }
 
-    @Suppress("ReturnCount")
     private fun addBinary(
         fileKey: String,
         publishSetting: PublishSetting,
-    ): Boolean {
-        val contentId = publishSetting.contentId ?: return false
+    ) {
+        val contentId = publishSetting.contentId ?: throw NotFoundRequiredField("contentId")
         val gms = if (publishSetting.hasGoogleService) YES_FIELD else NO_FIELD
 
         val data =
@@ -171,7 +172,7 @@ class UpdateAppRepository(
         if (debugSetting.dryMode) {
             println("Data for add binary: ")
             println(data)
-            return true
+            return
         }
 
         val addBinaryResponse =
@@ -185,12 +186,10 @@ class UpdateAppRepository(
                 "Add binary failed: ${addBinaryResponse.resultCode} ${addBinaryResponse.resultMessage}",
             )
         }
-        return true
     }
 
-    @Suppress("ReturnCount")
-    private fun submitReviewApplication(publishSetting: PublishSetting): Boolean {
-        val contentId = publishSetting.contentId ?: return false
+    private fun submitReviewApplication(publishSetting: PublishSetting) {
+        val contentId = publishSetting.contentId ?: throw NotFoundRequiredField("contentId")
         val data =
             SubmitReviewRequest(
                 contentId,
@@ -200,15 +199,19 @@ class UpdateAppRepository(
         if (debugSetting.dryMode) {
             println("Data for submit review: ")
             println(json)
-            return true
+            return
         }
 
         val submitReviewResult =
             networkClient.post(SUBMIT_APPLICATION)
                 .jsonBody(json.jsonObject.toString())
                 .response()
+        submitReviewResult.bodyOrThrow(SUBMIT_APPLICATION)
 
-        return submitReviewResult.second.statusCode in SUCCESS_STATUS_CODES
+        val statusCode = submitReviewResult.second.statusCode
+        if (statusCode !in SUCCESS_STATUS_CODES) {
+            throw UploadApkException("\"$SUBMIT_APPLICATION\" answered with HTTP $statusCode")
+        }
     }
 
     companion object {
